@@ -41,4 +41,12 @@ void main(List<String> args) async {
   final port = int.parse(Platform.environment['PORT'] ?? '8080');
   final server = await serve(handler, ip, port);
   print('Server listening on port ${server.port}');
+
+  // Graceful Shutdown
+  ProcessSignal.sigterm.watch().listen((signal) async {
+    print('Received SIGTERM, shutting down gracefully...');
+    databaseService.close();
+    await server.close();
+    exit(0);
+  });
 }

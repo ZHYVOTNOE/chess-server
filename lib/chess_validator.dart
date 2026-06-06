@@ -1,6 +1,14 @@
 import 'dart:math';
 import 'package:bishop/bishop.dart';
 
+class MoveResult {
+  final bool success;
+  final String? newFen;
+  final String? error;
+
+  MoveResult({required this.success, this.newFen, this.error});
+}
+
 class ChessValidator {
   final Map<String, Variant> _variants = {};
   final Random _random = Random();
@@ -28,6 +36,30 @@ class ChessValidator {
     return _variants.containsKey(variant);
   }
 
+  // НОВЫЙ МЕТОД: Применяет ход к текущей позиции и возвращает новый FEN
+  MoveResult applyMove(String currentFen, String move, String variant) {
+    if (!isVariantSupported(variant)) {
+      return MoveResult(success: false, error: 'Unsupported variant');
+    }
+
+    try {
+      final v = _variants[variant]!;
+      final game = Game(variant: v);
+      
+      game.loadFen(currentFen);
+      
+      final success = game.makeMoveString(move);
+      if (!success) {
+        return MoveResult(success: false, error: 'Illegal move');
+      }
+      
+      return MoveResult(success: true, newFen: game.fen);
+    } catch (e) {
+      return MoveResult(success: false, error: 'Invalid move format');
+    }
+  }
+
+  @deprecated
   bool validateMove(String fen, String variant) {
     if (!isVariantSupported(variant)) {
       return false;
@@ -35,7 +67,6 @@ class ChessValidator {
 
     try {
       final v = _variants[variant]!;
-      // Проверяем валидность FEN через bishop
       final game = Game(variant: v);
       game.loadFen(fen);
       return true;
@@ -46,7 +77,6 @@ class ChessValidator {
 
   String getInitialFen(String variant) {
     if (!isVariantSupported(variant)) {
-      // Возвращаем стандартную позицию если вариант не поддерживается
       final game = Game(variant: Variant.standard());
       return game.fen;
     }
@@ -54,7 +84,6 @@ class ChessValidator {
     final v = _variants[variant]!;
 
     if (variant == 'chess960') {
-      // Генерируем случайную начальную позицию для chess960
       return _generateRandomChess960Position();
     }
 
@@ -63,29 +92,21 @@ class ChessValidator {
   }
 
   String _generateRandomChess960Position() {
-    // Генерация случайной позиции chess960 по алгоритму
     final n = _random.nextInt(960);
-    
-    // Массив из 8 позиций (0-7) для фигур
     final board = List<String>.filled(8, '');
     
-    // 1. Расстановка слонов
-    // Белопольный слон: поля [1, 3, 5, 7]
     final whiteBishopIndex = n % 4;
     final whiteBishopPos = [1, 3, 5, 7][whiteBishopIndex];
     board[whiteBishopPos] = 'B';
     
     var currentN = n ~/ 4;
     
-    // Чернопольный слон: поля [0, 2, 4, 6]
     final blackBishopIndex = currentN % 4;
     final blackBishopPos = [0, 2, 4, 6][blackBishopIndex];
     board[blackBishopPos] = 'B';
     
     currentN = currentN ~/ 4;
     
-    // 2. Расстановка ферзя
-    // Получаем список свободных полей
     final freeFields = <int>[];
     for (int i = 0; i < 8; i++) {
       if (board[i].isEmpty) {
@@ -99,8 +120,6 @@ class ChessValidator {
     
     currentN = currentN ~/ 6;
     
-    // 3. Расстановка коней
-    // Получаем обновленный список свободных полей
     final freeFieldsAfterQueen = <int>[];
     for (int i = 0; i < 8; i++) {
       if (board[i].isEmpty) {
@@ -108,7 +127,6 @@ class ChessValidator {
       }
     }
     
-    // Комбинации для двух коней на 5 местах
     final knightCombinations = [
       [0, 1], [0, 2], [0, 3], [0, 4],
       [1, 2], [1, 3], [1, 4],
@@ -124,8 +142,6 @@ class ChessValidator {
     board[knight1Pos] = 'N';
     board[knight2Pos] = 'N';
     
-    // 4. Расстановка короля и ладей
-    // Получаем последние 3 свободных поля
     final freeFieldsAfterKnights = <int>[];
     for (int i = 0; i < 8; i++) {
       if (board[i].isEmpty) {
@@ -133,23 +149,16 @@ class ChessValidator {
       }
     }
     
-    // Сортируем свободные поля
     freeFieldsAfterKnights.sort();
     
-    // Ладья - король - ладья
     board[freeFieldsAfterKnights[0]] = 'R';
     board[freeFieldsAfterKnights[1]] = 'K';
     board[freeFieldsAfterKnights[2]] = 'R';
     
-    // Генерируем FEN строку
     final pieces = board.join();
-    
-    // Полная FEN для chess960: [позиция белых] / [позиция черных] w KQkq - 0 1
-    // Черные фигуры - зеркальное отражение белых (меняем регистр)
     final blackPieces = pieces.split('').map((c) => c.toLowerCase()).join();
     
     final fen = '$blackPieces/pppppppp/8/8/8/8/PPPPPPPP/$pieces w KQkq - 0 1';
-  
     
     return fen;
   }

@@ -12,8 +12,6 @@ Handler createWebSocketHandler(
   ChessValidator chessValidator,
 ) {
   return webSocketHandler((WebSocketChannel channel) {
-    // Извлекаем user_id из заголовков при подключении
-    // В реальном приложении это может быть JWT токен или сессия
     String? userId;
 
     channel.stream.listen((message) async {
@@ -22,7 +20,6 @@ Handler createWebSocketHandler(
         final action = data['action'];
 
         if (action == 'find_match') {
-          // Проверяем авторизацию
           userId ??= data['user_id'] as String?;
 
           if (userId == null) {
@@ -49,8 +46,16 @@ Handler createWebSocketHandler(
 
           if (!result.matchFound) {
             channel.sink.add(jsonEncode(result.toJson()));
+          } else {
+            // НОВОЕ: уведомляем инициатора поиска о найденном матче
+            channel.sink.add(jsonEncode({
+              'match_found': true,
+              'game_id': result.gameId,
+              'white_id': result.whiteId,
+              'black_id': result.blackId,
+              'your_color': result.whiteId == userId ? 'white' : 'black',
+            }));
           }
-          // Если матч найден, уведомление уже отправлено в matchmakingService
         } else if (action == 'make_move') {
           if (userId == null) {
             channel.sink.add(jsonEncode({
@@ -60,18 +65,17 @@ Handler createWebSocketHandler(
           }
 
           final gameId = data['game_id'] as String?;
-          final fen = data['fen'] as String?;
+          final move = data['move'] as String?;
           final whiteTime = data['white_time'] as int?;
           final blackTime = data['black_time'] as int?;
 
-          if (gameId == null || fen == null || whiteTime == null || blackTime == null) {
+          if (gameId == null || move == null || whiteTime == null || blackTime == null) {
             channel.sink.add(jsonEncode({
               'error': 'Missing required fields',
             }));
             return;
           }
 
-          // Получаем игру для валидации варианта
           final game = matchmakingService.getGame(gameId);
           if (game == null) {
             channel.sink.add(jsonEncode({
@@ -80,31 +84,44 @@ Handler createWebSocketHandler(
             return;
           }
 
-          // Валидируем FEN
-          if (!chessValidator.validateMove(fen, game.variant)) {
+          final currentFen = matchmakingService.getGameState(gameId);
+          if (currentFen == null) {
             channel.sink.add(jsonEncode({
-              'move_accepted': false,
-              'error': 'Invalid FEN',
+              'error': 'Game state not found',
             }));
             return;
           }
 
-          // Получаем последний номер хода
+          final moveResult = chessValidator.applyMove(currentFen, move, game.variant);
+
+          if (!moveResult.success) {
+            channel.sink.add(jsonEncode({
+              'move_accepted': false,
+              'error': moveResult.error ?? 'Invalid move',
+            }));
+            return;
+          }
+
           final lastMoveNumber = await databaseService.getLastMoveNumber(gameId);
           final newMoveNumber = lastMoveNumber + 1;
 
-          // Добавляем ход в базу данных
           await databaseService.addMove(
             gameId,
-            fen,
+            moveResult.newFen!,
             newMoveNumber,
             whiteTime,
             blackTime,
           );
 
+          matchmakingService.updateGameState(gameId, moveResult.newFen!);
+
           channel.sink.add(jsonEncode({
             'move_accepted': true,
             'move_number': newMoveNumber,
+            'move': move,
+            'new_fen': moveResult.newFen,
+            'white_time': whiteTime,
+            'black_time': blackTime,
           }));
         } else if (action == 'get_moves') {
           if (userId == null) {
@@ -147,7 +164,6 @@ Handler createWebSocketHandler(
         channel.sink.add(jsonEncode({'error': 'Invalid message format'}));
       }
     }, onDone: () {
-      // При отключении удаляем пользователя из очереди
       if (userId != null) {
         matchmakingService.removeFromQueue(userId!);
       }

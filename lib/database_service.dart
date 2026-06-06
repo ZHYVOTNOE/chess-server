@@ -75,6 +75,12 @@ class DatabaseService {
       CREATE INDEX IF NOT EXISTS idx_game_moves_move_number 
       ON game_moves(game_id, move_number)
     ''');
+
+    // НОВОЕ: Уникальный индекс для предотвращения дубликатов ходов
+    _db.execute('''
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_game_moves_unique 
+      ON game_moves(game_id, move_number)
+    ''');
   }
 
   Future<void> addMove(
@@ -141,15 +147,9 @@ class DatabaseService {
     ''');
 
     final resultSet = stmt.select([gameId]);
-    
-    if (resultSet.isNotEmpty) {
-      final result = resultSet.first['max_move'];
-      stmt.dispose();
-      return result as int? ?? 0;
-    }
-    
+    final result = resultSet.first['max_move'];
     stmt.dispose();
-    return 0;
+    return (result as int?) ?? 0;
   }
 
   Future<void> deleteGameMoves(String gameId) async {

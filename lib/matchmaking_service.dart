@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:math';
 import 'package:web_socket_channel/web_socket_channel.dart';
 import 'chess_validator.dart';
@@ -60,6 +61,7 @@ class GameSession {
 class MatchmakingService {
   final List<MatchmakingQueueEntry> _queue = [];
   final Map<String, GameSession> _games = {};
+  final Map<String, String> _gameStates = {}; // НОВОЕ: Хранение текущего FEN для каждой игры
   final Random _random = Random();
   final ChessValidator _chessValidator;
 
@@ -74,13 +76,11 @@ class MatchmakingService {
     int ratingRange,
     WebSocketChannel? channel,
   ) {
-    // Проверяем, есть ли пользователь уже в очереди
     final existingIndex = _queue.indexWhere((e) => e.userId == userId);
     if (existingIndex != -1) {
       _queue.removeAt(existingIndex);
     }
 
-    // Ищем оппонента с взаимным пересечением диапазонов рейтингов
     MatchmakingQueueEntry? opponent;
     int opponentIndex = -1;
 
@@ -89,7 +89,6 @@ class MatchmakingService {
       if (entry.variantKey == variantKey &&
           entry.timeControlType == timeControlType &&
           entry.userId != userId) {
-        // Проверяем взаимное пересечение диапазонов
         final ratingDiff = (entry.rating - rating).abs();
         final minRange = min(ratingRange, entry.ratingRange);
         
@@ -102,16 +101,12 @@ class MatchmakingService {
     }
 
     if (opponent != null) {
-      // Удаляем оппонента из очереди
       _queue.removeAt(opponentIndex);
 
-      // Получаем начальную FEN для варианта
       final initialFen = _chessValidator.getInitialFen(variantKey);
 
-      // Создаем игру
       final game = createGame(userId, opponent.userId, variantKey, timeControlType, initialFen);
 
-      // Отправляем уведомление оппоненту
       if (opponent.channel != null) {
         _sendMatchFoundNotification(opponent.channel!, game, opponent.userId == game.whiteId);
       }
@@ -123,7 +118,6 @@ class MatchmakingService {
         blackId: game.blackId,
       );
     } else {
-      // Добавляем пользователя в очередь
       final entry = MatchmakingQueueEntry(
         userId: userId,
         variantKey: variantKey,
@@ -146,7 +140,6 @@ class MatchmakingService {
     String timeControl,
     String initialFen,
   ) {
-    // Случайно назначаем цвета
     final isPlayer1White = _random.nextBool();
     
     final gameId = _generateGameId();
@@ -163,7 +156,17 @@ class MatchmakingService {
     );
 
     _games[gameId] = game;
+    _gameStates[gameId] = initialFen; // НОВОЕ: Сохраняем начальную позицию
     return game;
+  }
+
+  // НОВЫЕ МЕТОДЫ для работы с состоянием игры
+  String? getGameState(String gameId) {
+    return _gameStates[gameId];
+  }
+
+  void updateGameState(String gameId, String fen) {
+    _gameStates[gameId] = fen;
   }
 
   void removeFromQueue(String userId) {
@@ -200,7 +203,7 @@ class MatchmakingService {
       'black_id': game.blackId,
       'your_color': isWhite ? 'white' : 'black',
     };
-    channel.sink.add(response.toString());
+    channel.sink.add(jsonEncode(response)); // ИСПРАВЛЕНО: используем jsonEncode
   }
 }
 
