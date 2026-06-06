@@ -76,14 +76,13 @@ class DatabaseService {
       ON game_moves(game_id, move_number)
     ''');
 
-    // НОВОЕ: Уникальный индекс для предотвращения дубликатов ходов
     _db.execute('''
       CREATE UNIQUE INDEX IF NOT EXISTS idx_game_moves_unique 
       ON game_moves(game_id, move_number)
     ''');
   }
 
-  Future<void> addMove(
+  Future<bool> addMove(
     String gameId,
     String fen,
     int moveNumber,
@@ -95,16 +94,26 @@ class DatabaseService {
       VALUES (?, ?, ?, ?, ?, ?)
     ''');
 
-    stmt.execute([
-      gameId,
-      fen,
-      moveNumber,
-      whiteTime,
-      blackTime,
-      DateTime.now().toIso8601String(),
-    ]);
-
-    stmt.dispose();
+    try {
+      stmt.execute([
+        gameId,
+        fen,
+        moveNumber,
+        whiteTime,
+        blackTime,
+        DateTime.now().toIso8601String(),
+      ]);
+      return true;
+    } on SqliteException catch (e) {
+      // UNIQUE constraint violation (дубликат хода)
+      print('SQLite error on addMove: $e');
+      return false;
+    } catch (e) {
+      print('Unexpected error on addMove: $e');
+      return false;
+    } finally {
+      stmt.dispose();
+    }
   }
 
   Future<List<GameMove>> getMoves(String gameId, {int fromMoveNumber = 0}) async {
@@ -116,20 +125,23 @@ class DatabaseService {
     ''');
 
     final moves = <GameMove>[];
-    final resultSet = stmt.select([gameId, fromMoveNumber]);
-    
-    for (final row in resultSet) {
-      moves.add(GameMove(
-        gameId: row['game_id'] as String,
-        fen: row['fen'] as String,
-        moveNumber: row['move_number'] as int,
-        whiteTime: row['white_time'] as int,
-        blackTime: row['black_time'] as int,
-        createdAt: DateTime.parse(row['created_at'] as String),
-      ));
+    try {
+      final resultSet = stmt.select([gameId, fromMoveNumber]);
+      
+      for (final row in resultSet) {
+        moves.add(GameMove(
+          gameId: row['game_id'] as String,
+          fen: row['fen'] as String,
+          moveNumber: row['move_number'] as int,
+          whiteTime: row['white_time'] as int,
+          blackTime: row['black_time'] as int,
+          createdAt: DateTime.parse(row['created_at'] as String),
+        ));
+      }
+    } finally {
+      stmt.dispose();
     }
-
-    stmt.dispose();
+    
     return moves;
   }
 
@@ -146,16 +158,22 @@ class DatabaseService {
       WHERE game_id = ?
     ''');
 
-    final resultSet = stmt.select([gameId]);
-    final result = resultSet.first['max_move'];
-    stmt.dispose();
-    return (result as int?) ?? 0;
+    try {
+      final resultSet = stmt.select([gameId]);
+      final result = resultSet.first['max_move'];
+      return (result as int?) ?? 0;
+    } finally {
+      stmt.dispose();
+    }
   }
 
   Future<void> deleteGameMoves(String gameId) async {
     final stmt = _db.prepare('DELETE FROM game_moves WHERE game_id = ?');
-    stmt.execute([gameId]);
-    stmt.dispose();
+    try {
+      stmt.execute([gameId]);
+    } finally {
+      stmt.dispose();
+    }
   }
 
   void close() {

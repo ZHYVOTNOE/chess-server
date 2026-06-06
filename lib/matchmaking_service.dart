@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:math';
 import 'package:web_socket_channel/web_socket_channel.dart';
@@ -29,9 +30,11 @@ class GameSession {
   final String blackId;
   final String variant;
   final String timeControl;
-  final String status;
+  String status;
   final DateTime createdAt;
   final String? initialFen;
+  WebSocketChannel? whiteChannel;
+  WebSocketChannel? blackChannel;
 
   GameSession({
     required this.gameId,
@@ -42,6 +45,8 @@ class GameSession {
     required this.status,
     required this.createdAt,
     this.initialFen,
+    this.whiteChannel,
+    this.blackChannel,
   });
 
   Map<String, dynamic> toJson() {
@@ -61,9 +66,12 @@ class GameSession {
 class MatchmakingService {
   final List<MatchmakingQueueEntry> _queue = [];
   final Map<String, GameSession> _games = {};
-  final Map<String, String> _gameStates = {}; // НОВОЕ: Хранение текущего FEN для каждой игры
+  final Map<String, String> _gameStates = {};
+  final Map<String, Timer> _disconnectTimers = {}; // gameId -> Timer
   final Random _random = Random();
   final ChessValidator _chessValidator;
+  
+  static const int reconnectTimeoutSeconds = 30;
 
   MatchmakingService({ChessValidator? chessValidator})
       : _chessValidator = chessValidator ?? ChessValidator();
@@ -101,22 +109,47 @@ class MatchmakingService {
     }
 
     if (opponent != null) {
-      _queue.removeAt(opponentIndex);
+      // Проверка активности канала оппонента (#8)
+      if (opponent.channel != null && opponent.channel!.closeCode != null) {
+        // Канал закрыт, пропускаем этого оппонента и добавляем в очередь
+        _queue.removeAt(opponentIndex);
+        final entry = MatchmakingQueueEntry(
+          userId: userId,
+          variantKey: variantKey,
+          timeControlType: timeControlType,
+          rating: rating,
+          ratingRange: ratingRange,
+          enteredAt: DateTime.now(),
+          channel: channel,
+        );
+        _queue.add(entry);
+        return MatchmakingResult(matchFound: false);
+      } else {
+        _queue.removeAt(opponentIndex);
 
-      final initialFen = _chessValidator.getInitialFen(variantKey);
+        final initialFen = _chessValidator.getInitialFen(variantKey);
 
-      final game = createGame(userId, opponent.userId, variantKey, timeControlType, initialFen);
+        final game = createGame(
+          userId,
+          opponent.userId,
+          variantKey,
+          timeControlType,
+          initialFen,
+          channel,
+          opponent.channel,
+        );
 
-      if (opponent.channel != null) {
-        _sendMatchFoundNotification(opponent.channel!, game, opponent.userId == game.whiteId);
+        if (opponent.channel != null) {
+          _sendMatchFoundNotification(opponent.channel!, game, opponent.userId == game.whiteId);
+        }
+
+        return MatchmakingResult(
+          matchFound: true,
+          gameId: game.gameId,
+          whiteId: game.whiteId,
+          blackId: game.blackId,
+        );
       }
-
-      return MatchmakingResult(
-        matchFound: true,
-        gameId: game.gameId,
-        whiteId: game.whiteId,
-        blackId: game.blackId,
-      );
     } else {
       final entry = MatchmakingQueueEntry(
         userId: userId,
@@ -139,9 +172,10 @@ class MatchmakingService {
     String variant,
     String timeControl,
     String initialFen,
+    WebSocketChannel? player1Channel,
+    WebSocketChannel? player2Channel,
   ) {
     final isPlayer1White = _random.nextBool();
-    
     final gameId = _generateGameId();
     
     final game = GameSession(
@@ -153,20 +187,86 @@ class MatchmakingService {
       status: 'in_progress',
       createdAt: DateTime.now(),
       initialFen: initialFen,
+      whiteChannel: isPlayer1White ? player1Channel : player2Channel,
+      blackChannel: isPlayer1White ? player2Channel : player1Channel,
     );
 
     _games[gameId] = game;
-    _gameStates[gameId] = initialFen; // НОВОЕ: Сохраняем начальную позицию
+    _gameStates[gameId] = initialFen;
     return game;
   }
 
-  // НОВЫЕ МЕТОДЫ для работы с состоянием игры
   String? getGameState(String gameId) {
     return _gameStates[gameId];
   }
 
   void updateGameState(String gameId, String fen) {
     _gameStates[gameId] = fen;
+  }
+
+  void removeGame(String gameId) {
+    _games.remove(gameId);
+    _gameStates.remove(gameId);
+    _disconnectTimers[gameId]?.cancel();
+    _disconnectTimers.remove(gameId);
+  }
+
+  List<GameSession> getUserGames(String userId) {
+    return _games.values.where((game) => 
+      game.whiteId == userId || game.blackId == userId
+    ).toList();
+  }
+
+  // Обновление канала игрока при реконнекте
+  void updatePlayerChannel(String gameId, String userId, WebSocketChannel channel) {
+    final game = _games[gameId];
+    if (game == null) return;
+    
+    if (game.whiteId == userId) {
+      game.whiteChannel = channel;
+    } else if (game.blackId == userId) {
+      game.blackChannel = channel;
+    }
+    
+    // Отменяем таймер дисконнекта, если он был
+    _disconnectTimers[gameId]?.cancel();
+    _disconnectTimers.remove(gameId);
+  }
+
+  // Обработка отключения игрока с таймером на реконнект
+  void handlePlayerDisconnect(String userId) {
+    final userGames = getUserGames(userId);
+    
+    for (final game in userGames) {
+      // Если таймер уже запущен - не дублируем
+      if (_disconnectTimers.containsKey(game.gameId)) continue;
+      
+      final opponentId = game.whiteId == userId ? game.blackId : game.whiteId;
+      final opponentChannel = game.whiteId == userId ? game.blackChannel : game.whiteChannel;
+      
+      // Уведомляем соперника
+      opponentChannel?.sink.add(jsonEncode({
+        'opponent_disconnected': true,
+        'game_id': game.gameId,
+        'reconnect_timeout': reconnectTimeoutSeconds,
+      }));
+      
+      // Запускаем таймер
+      _disconnectTimers[game.gameId] = Timer(
+        Duration(seconds: reconnectTimeoutSeconds),
+        () {
+          if (_games.containsKey(game.gameId)) {
+            opponentChannel?.sink.add(jsonEncode({
+              'game_over': true,
+              'game_id': game.gameId,
+              'result': 'disconnect',
+              'winner': opponentId,
+            }));
+            removeGame(game.gameId);
+          }
+        },
+      );
+    }
   }
 
   void removeFromQueue(String userId) {
@@ -202,8 +302,16 @@ class MatchmakingService {
       'white_id': game.whiteId,
       'black_id': game.blackId,
       'your_color': isWhite ? 'white' : 'black',
+      'initial_fen': game.initialFen,
     };
-    channel.sink.add(jsonEncode(response)); // ИСПРАВЛЕНО: используем jsonEncode
+    channel.sink.add(jsonEncode(response));
+  }
+
+  void dispose() {
+    for (final timer in _disconnectTimers.values) {
+      timer.cancel();
+    }
+    _disconnectTimers.clear();
   }
 }
 

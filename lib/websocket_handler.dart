@@ -5,11 +5,13 @@ import 'package:web_socket_channel/web_socket_channel.dart';
 import 'matchmaking_service.dart';
 import 'database_service.dart';
 import 'chess_validator.dart';
+import 'auth_service.dart';
 
 Handler createWebSocketHandler(
   MatchmakingService matchmakingService,
   DatabaseService databaseService,
   ChessValidator chessValidator,
+  AuthService authService,
 ) {
   return webSocketHandler((WebSocketChannel channel) {
     String? userId;
@@ -19,8 +21,73 @@ Handler createWebSocketHandler(
         final data = jsonDecode(message as String);
         final action = data['action'];
 
-        if (action == 'find_match') {
-          userId ??= data['user_id'] as String?;
+        if (action == 'authenticate') {
+          final token = data['token'] as String?;
+          if (token != null) {
+            final verifiedUserId = authService.verifyToken(token);
+            if (verifiedUserId != null) {
+              userId = verifiedUserId;
+              channel.sink.add(jsonEncode({'authenticated': true}));
+            } else {
+              channel.sink.add(jsonEncode({'error': 'Invalid token'}));
+            }
+          } else {
+            channel.sink.add(jsonEncode({'error': 'Missing token'}));
+          }
+        } else if (action == 'reconnect') {
+          final token = data['token'] as String?;
+          if (token != null) {
+            final verifiedUserId = authService.verifyToken(token);
+            if (verifiedUserId != null) {
+              userId = verifiedUserId;
+            } else {
+              channel.sink.add(jsonEncode({'error': 'Invalid token'}));
+              return;
+            }
+          }
+          final gameId = data['game_id'] as String?;
+
+          if (userId == null || gameId == null) {
+            channel.sink.add(jsonEncode({'error': 'Missing user_id or game_id'}));
+            return;
+          }
+
+          final game = matchmakingService.getGame(gameId);
+          if (game == null) {
+            channel.sink.add(jsonEncode({'error': 'Game not found or already finished'}));
+            return;
+          }
+
+          if (userId != game.whiteId && userId != game.blackId) {
+            channel.sink.add(jsonEncode({'error': 'You are not a participant'}));
+            return;
+          }
+
+          matchmakingService.updatePlayerChannel(gameId, userId!, channel);
+
+          final currentFen = matchmakingService.getGameState(gameId);
+          channel.sink.add(jsonEncode({
+            'reconnected': true,
+            'game_id': gameId,
+            'your_color': userId == game.whiteId ? 'white' : 'black',
+            'current_fen': currentFen,
+            'white_id': game.whiteId,
+            'black_id': game.blackId,
+          }));
+        } else if (action == 'find_match') {
+          final token = data['token'] as String?;
+          if (token != null) {
+            final verifiedUserId = authService.verifyToken(token);
+            if (verifiedUserId != null) {
+              userId = verifiedUserId;
+            } else {
+              channel.sink.add(jsonEncode({
+                'error': 'Invalid token',
+                'match_found': false,
+              }));
+              return;
+            }
+          }
 
           if (userId == null) {
             channel.sink.add(jsonEncode({
@@ -47,20 +114,18 @@ Handler createWebSocketHandler(
           if (!result.matchFound) {
             channel.sink.add(jsonEncode(result.toJson()));
           } else {
-            // НОВОЕ: уведомляем инициатора поиска о найденном матче
             channel.sink.add(jsonEncode({
               'match_found': true,
               'game_id': result.gameId,
               'white_id': result.whiteId,
               'black_id': result.blackId,
               'your_color': result.whiteId == userId ? 'white' : 'black',
+              'initial_fen': matchmakingService.getGame(result.gameId!)?.initialFen,
             }));
           }
         } else if (action == 'make_move') {
           if (userId == null) {
-            channel.sink.add(jsonEncode({
-              'error': 'User not authenticated',
-            }));
+            channel.sink.add(jsonEncode({'error': 'User not authenticated'}));
             return;
           }
 
@@ -70,24 +135,60 @@ Handler createWebSocketHandler(
           final blackTime = data['black_time'] as int?;
 
           if (gameId == null || move == null || whiteTime == null || blackTime == null) {
-            channel.sink.add(jsonEncode({
-              'error': 'Missing required fields',
-            }));
+            channel.sink.add(jsonEncode({'error': 'Missing required fields'}));
             return;
           }
 
           final game = matchmakingService.getGame(gameId);
           if (game == null) {
+            channel.sink.add(jsonEncode({'error': 'Game not found'}));
+            return;
+          }
+
+          // Проверка статуса игры (#3)
+          if (game.status != 'in_progress') {
             channel.sink.add(jsonEncode({
-              'error': 'Game not found',
+              'move_accepted': false,
+              'error': 'Game is already finished',
             }));
+            return;
+          }
+
+          if (userId != game.whiteId && userId != game.blackId) {
+            channel.sink.add(jsonEncode({'error': 'You are not a participant in this game'}));
             return;
           }
 
           final currentFen = matchmakingService.getGameState(gameId);
           if (currentFen == null) {
+            channel.sink.add(jsonEncode({'error': 'Game state not found'}));
+            return;
+          }
+
+          final currentTurn = chessValidator.getCurrentTurn(currentFen);
+          if (currentTurn == null) {
             channel.sink.add(jsonEncode({
-              'error': 'Game state not found',
+              'move_accepted': false,
+              'error': 'Invalid game state',
+            }));
+            return;
+          }
+
+          final isWhiteTurn = currentTurn == 'w';
+          final isPlayerWhite = userId == game.whiteId;
+
+          if (isWhiteTurn != isPlayerWhite) {
+            channel.sink.add(jsonEncode({
+              'move_accepted': false,
+              'error': 'Not your turn',
+            }));
+            return;
+          }
+
+          if (isWhiteTurn != isPlayerWhite) {
+            channel.sink.add(jsonEncode({
+              'move_accepted': false,
+              'error': 'Not your turn',
             }));
             return;
           }
@@ -105,7 +206,7 @@ Handler createWebSocketHandler(
           final lastMoveNumber = await databaseService.getLastMoveNumber(gameId);
           final newMoveNumber = lastMoveNumber + 1;
 
-          await databaseService.addMove(
+          final saved = await databaseService.addMove(
             gameId,
             moveResult.newFen!,
             newMoveNumber,
@@ -113,21 +214,56 @@ Handler createWebSocketHandler(
             blackTime,
           );
 
+          if (!saved) {
+            channel.sink.add(jsonEncode({
+              'move_accepted': false,
+              'error': 'Failed to save move',
+            }));
+            return;
+          }
+
           matchmakingService.updateGameState(gameId, moveResult.newFen!);
 
-          channel.sink.add(jsonEncode({
+          final moveConfirmation = jsonEncode({
             'move_accepted': true,
             'move_number': newMoveNumber,
             'move': move,
             'new_fen': moveResult.newFen,
             'white_time': whiteTime,
             'black_time': blackTime,
+          });
+          channel.sink.add(moveConfirmation);
+
+          final opponentChannel = userId == game.whiteId ? game.blackChannel : game.whiteChannel;
+          opponentChannel?.sink.add(jsonEncode({
+            'opponent_move': true,
+            'game_id': gameId,
+            'move': move,
+            'move_number': newMoveNumber,
+            'new_fen': moveResult.newFen,
+            'white_time': whiteTime,
+            'black_time': blackTime,
           }));
+
+          // Проверка окончания игры
+          final gameEndResult = chessValidator.checkGameEnd(moveResult.newFen!, game.variant);
+          if (gameEndResult.isGameOver) {
+            final endMessage = jsonEncode({
+              'game_over': true,
+              'game_id': gameId,
+              'result': gameEndResult.result,
+              'reason': gameEndResult.reason,
+              'new_fen': moveResult.newFen,
+            });
+            
+            channel.sink.add(endMessage);
+            opponentChannel?.sink.add(endMessage);
+            
+            matchmakingService.removeGame(gameId);
+          }
         } else if (action == 'get_moves') {
           if (userId == null) {
-            channel.sink.add(jsonEncode({
-              'error': 'User not authenticated',
-            }));
+            channel.sink.add(jsonEncode({'error': 'User not authenticated'}));
             return;
           }
 
@@ -135,42 +271,71 @@ Handler createWebSocketHandler(
           final fromMoveNumber = data['from_move_number'] as int? ?? 0;
 
           if (gameId == null) {
-            channel.sink.add(jsonEncode({
-              'error': 'Missing game_id',
-            }));
+            channel.sink.add(jsonEncode({'error': 'Missing game_id'}));
             return;
           }
 
           final moves = await databaseService.getMoves(gameId, fromMoveNumber: fromMoveNumber);
           final movesJson = moves.map((m) => m.toJson()).toList();
 
-          channel.sink.add(jsonEncode({
-            'moves': movesJson,
-          }));
+          channel.sink.add(jsonEncode({'moves': movesJson}));
         } else if (action == 'cancel_match') {
           if (userId != null) {
             matchmakingService.removeFromQueue(userId!);
             channel.sink.add(jsonEncode({'match_cancelled': true}));
           }
-        } else if (action == 'authenticate') {
-          userId = data['user_id'] as String?;
-          if (userId != null) {
-            channel.sink.add(jsonEncode({'authenticated': true}));
-          } else {
-            channel.sink.add(jsonEncode({'error': 'Invalid user_id'}));
+        } else if (action == 'resign') {
+          if (userId == null) {
+            channel.sink.add(jsonEncode({'error': 'User not authenticated'}));
+            return;
           }
+
+          final gameId = data['game_id'] as String?;
+          if (gameId == null) {
+            channel.sink.add(jsonEncode({'error': 'Missing game_id'}));
+            return;
+          }
+
+          final game = matchmakingService.getGame(gameId);
+          if (game == null) {
+            channel.sink.add(jsonEncode({'error': 'Game not found'}));
+            return;
+          }
+
+          if (userId != game.whiteId && userId != game.blackId) {
+            channel.sink.add(jsonEncode({'error': 'You are not a participant in this game'}));
+            return;
+          }
+
+          final winnerId = userId == game.whiteId ? game.blackId : game.whiteId;
+
+          final endMessage = jsonEncode({
+            'game_over': true,
+            'game_id': gameId,
+            'result': 'resignation',
+            'winner': winnerId,
+          });
+
+          final opponentChannel = userId == game.whiteId ? game.blackChannel : game.whiteChannel;
+          channel.sink.add(endMessage); // Отправителю
+          opponentChannel?.sink.add(endMessage); // Сопернику
+
+          matchmakingService.removeGame(gameId);
         }
       } catch (e) {
+        print('Handler error: $e');
         channel.sink.add(jsonEncode({'error': 'Invalid message format'}));
       }
     }, onDone: () {
       if (userId != null) {
         matchmakingService.removeFromQueue(userId!);
+        matchmakingService.handlePlayerDisconnect(userId!);
       }
     }, onError: (error) {
       print('WebSocket error: $error');
       if (userId != null) {
         matchmakingService.removeFromQueue(userId!);
+        matchmakingService.handlePlayerDisconnect(userId!);
       }
     });
   });
