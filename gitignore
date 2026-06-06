@@ -1,0 +1,15 @@
+# Dart
+.dart_tool/
+build/
+.pub/
+pubspec.lock
+
+# Database (НИКОГДА не храните БД в GitHub)
+*.db
+*.db-journal
+*.db-wal
+
+# IDE & OS
+.idea/
+.vscode/
+.DS_Store
