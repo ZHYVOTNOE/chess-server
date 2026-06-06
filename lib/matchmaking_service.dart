@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:math';
 import 'package:web_socket_channel/web_socket_channel.dart';
+import 'package:synchronized/synchronized.dart';
 import 'chess_validator.dart';
 
 class MatchmakingQueueEntry {
@@ -70,49 +71,89 @@ class MatchmakingService {
   final Map<String, Timer> _disconnectTimers = {}; // gameId -> Timer
   final Random _random = Random();
   final ChessValidator _chessValidator;
+  final Lock _lock = Lock();
   
   static const int reconnectTimeoutSeconds = 30;
 
   MatchmakingService({ChessValidator? chessValidator})
       : _chessValidator = chessValidator ?? ChessValidator();
 
-  MatchmakingResult findMatch(
+  Future<MatchmakingResult> findMatch(
     String userId,
     String variantKey,
     String timeControlType,
     int rating,
     int ratingRange,
     WebSocketChannel? channel,
-  ) {
-    final existingIndex = _queue.indexWhere((e) => e.userId == userId);
-    if (existingIndex != -1) {
-      _queue.removeAt(existingIndex);
-    }
+  ) async {
+    return await _lock.synchronized(() {
+      final existingIndex = _queue.indexWhere((e) => e.userId == userId);
+      if (existingIndex != -1) {
+        _queue.removeAt(existingIndex);
+      }
 
-    MatchmakingQueueEntry? opponent;
-    int opponentIndex = -1;
+      MatchmakingQueueEntry? opponent;
+      int opponentIndex = -1;
 
-    for (int i = 0; i < _queue.length; i++) {
-      final entry = _queue[i];
-      if (entry.variantKey == variantKey &&
-          entry.timeControlType == timeControlType &&
-          entry.userId != userId) {
-        final ratingDiff = (entry.rating - rating).abs();
-        final minRange = min(ratingRange, entry.ratingRange);
-        
-        if (ratingDiff <= minRange) {
-          opponent = entry;
-          opponentIndex = i;
-          break;
+      for (int i = 0; i < _queue.length; i++) {
+        final entry = _queue[i];
+        if (entry.variantKey == variantKey &&
+            entry.timeControlType == timeControlType &&
+            entry.userId != userId) {
+          final ratingDiff = (entry.rating - rating).abs();
+          final minRange = min(ratingRange, entry.ratingRange);
+          
+          if (ratingDiff <= minRange) {
+            opponent = entry;
+            opponentIndex = i;
+            break;
+          }
         }
       }
-    }
 
-    if (opponent != null) {
-      // Проверка активности канала оппонента (#8)
-      if (opponent.channel != null && opponent.channel!.closeCode != null) {
-        // Канал закрыт, пропускаем этого оппонента и добавляем в очередь
-        _queue.removeAt(opponentIndex);
+      if (opponent != null) {
+        // Проверка активности канала оппонента (#8)
+        if (opponent.channel != null && opponent.channel!.closeCode != null) {
+          // Канал закрыт, пропускаем этого оппонента и добавляем в очередь
+          _queue.removeAt(opponentIndex);
+          final entry = MatchmakingQueueEntry(
+            userId: userId,
+            variantKey: variantKey,
+            timeControlType: timeControlType,
+            rating: rating,
+            ratingRange: ratingRange,
+            enteredAt: DateTime.now(),
+            channel: channel,
+          );
+          _queue.add(entry);
+          return MatchmakingResult(matchFound: false);
+        } else {
+          _queue.removeAt(opponentIndex);
+
+          final initialFen = _chessValidator.getInitialFen(variantKey);
+
+          final game = createGame(
+            userId,
+            opponent.userId,
+            variantKey,
+            timeControlType,
+            initialFen,
+            channel,
+            opponent.channel,
+          );
+
+          if (opponent.channel != null) {
+            _sendMatchFoundNotification(opponent.channel!, game, opponent.userId == game.whiteId);
+          }
+
+          return MatchmakingResult(
+            matchFound: true,
+            gameId: game.gameId,
+            whiteId: game.whiteId,
+            blackId: game.blackId,
+          );
+        }
+      } else {
         final entry = MatchmakingQueueEntry(
           userId: userId,
           variantKey: variantKey,
@@ -123,47 +164,10 @@ class MatchmakingService {
           channel: channel,
         );
         _queue.add(entry);
+
         return MatchmakingResult(matchFound: false);
-      } else {
-        _queue.removeAt(opponentIndex);
-
-        final initialFen = _chessValidator.getInitialFen(variantKey);
-
-        final game = createGame(
-          userId,
-          opponent.userId,
-          variantKey,
-          timeControlType,
-          initialFen,
-          channel,
-          opponent.channel,
-        );
-
-        if (opponent.channel != null) {
-          _sendMatchFoundNotification(opponent.channel!, game, opponent.userId == game.whiteId);
-        }
-
-        return MatchmakingResult(
-          matchFound: true,
-          gameId: game.gameId,
-          whiteId: game.whiteId,
-          blackId: game.blackId,
-        );
       }
-    } else {
-      final entry = MatchmakingQueueEntry(
-        userId: userId,
-        variantKey: variantKey,
-        timeControlType: timeControlType,
-        rating: rating,
-        ratingRange: ratingRange,
-        enteredAt: DateTime.now(),
-        channel: channel,
-      );
-      _queue.add(entry);
-
-      return MatchmakingResult(matchFound: false);
-    }
+    });
   }
 
   GameSession createGame(
@@ -312,6 +316,12 @@ class MatchmakingService {
       timer.cancel();
     }
     _disconnectTimers.clear();
+    
+    // Close all WebSocket channels
+    for (final game in _games.values) {
+      game.whiteChannel?.sink.close();
+      game.blackChannel?.sink.close();
+    }
   }
 }
 

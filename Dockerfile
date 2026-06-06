@@ -10,9 +10,9 @@ RUN dart pub get
 COPY . .
 RUN dart compile exe bin/server.dart -o bin/server
 
-# Build minimal serving image from AOT-compiled `/server`
-# and the pre-built AOT-runtime in the `/runtime/` directory of the base image.
-FROM scratch
+# Build minimal serving image with SQLite library
+FROM debian:bullseye-slim
+RUN apt-get update && apt-get install -y libsqlite3-0 && rm -rf /var/lib/apt/lists/*
 COPY --from=build /runtime/ /
 COPY --from=build /app/bin/server /app/bin/
 

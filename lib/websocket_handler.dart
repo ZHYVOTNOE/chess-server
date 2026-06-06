@@ -6,6 +6,7 @@ import 'matchmaking_service.dart';
 import 'database_service.dart';
 import 'chess_validator.dart';
 import 'auth_service.dart';
+import 'rate_limiter.dart';
 
 Handler createWebSocketHandler(
   MatchmakingService matchmakingService,
@@ -13,6 +14,8 @@ Handler createWebSocketHandler(
   ChessValidator chessValidator,
   AuthService authService,
 ) {
+  final rateLimiter = RateLimiter(maxRequests: 10, window: Duration(seconds: 1));
+
   return webSocketHandler((WebSocketChannel channel) {
     String? userId;
 
@@ -20,6 +23,12 @@ Handler createWebSocketHandler(
       try {
         final data = jsonDecode(message as String);
         final action = data['action'];
+
+        // Rate limiting check
+        if (userId != null && !rateLimiter.allow(userId!)) {
+          channel.sink.add(jsonEncode({'error': 'Rate limit exceeded'}));
+          return;
+        }
 
         if (action == 'authenticate') {
           final token = data['token'] as String?;
@@ -49,6 +58,12 @@ Handler createWebSocketHandler(
 
           if (userId == null || gameId == null) {
             channel.sink.add(jsonEncode({'error': 'Missing user_id or game_id'}));
+            return;
+          }
+
+          // Validate gameId format and length
+          if (gameId.length > 100 || !RegExp(r'^[\w-]+$').hasMatch(gameId)) {
+            channel.sink.add(jsonEncode({'error': 'Invalid game_id format'}));
             return;
           }
 
@@ -102,7 +117,7 @@ Handler createWebSocketHandler(
           final rating = data['rating'] as int? ?? 1200;
           final ratingRange = data['rating_range'] as int? ?? 200;
 
-          final result = matchmakingService.findMatch(
+          final result = await matchmakingService.findMatch(
             userId!,
             variant,
             timeControl,
@@ -136,6 +151,12 @@ Handler createWebSocketHandler(
 
           if (gameId == null || move == null || whiteTime == null || blackTime == null) {
             channel.sink.add(jsonEncode({'error': 'Missing required fields'}));
+            return;
+          }
+
+          // Validate gameId format and length
+          if (gameId.length > 100 || !RegExp(r'^[\w-]+$').hasMatch(gameId)) {
+            channel.sink.add(jsonEncode({'error': 'Invalid game_id format'}));
             return;
           }
 
@@ -275,6 +296,12 @@ Handler createWebSocketHandler(
             return;
           }
 
+          // Validate gameId format and length
+          if (gameId.length > 100 || !RegExp(r'^[\w-]+$').hasMatch(gameId)) {
+            channel.sink.add(jsonEncode({'error': 'Invalid game_id format'}));
+            return;
+          }
+
           final moves = await databaseService.getMoves(gameId, fromMoveNumber: fromMoveNumber);
           final movesJson = moves.map((m) => m.toJson()).toList();
 
@@ -293,6 +320,12 @@ Handler createWebSocketHandler(
           final gameId = data['game_id'] as String?;
           if (gameId == null) {
             channel.sink.add(jsonEncode({'error': 'Missing game_id'}));
+            return;
+          }
+
+          // Validate gameId format and length
+          if (gameId.length > 100 || !RegExp(r'^[\w-]+$').hasMatch(gameId)) {
+            channel.sink.add(jsonEncode({'error': 'Invalid game_id format'}));
             return;
           }
 

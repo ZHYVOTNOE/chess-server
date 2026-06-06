@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'dart:convert';
 
 import 'package:shelf/shelf.dart';
 import 'package:shelf/shelf_io.dart';
@@ -44,6 +45,42 @@ void main(List<String> args) async {
   // Graceful Shutdown
   ProcessSignal.sigterm.watch().listen((signal) async {
     print('Received SIGTERM, shutting down gracefully...');
+    
+    // Notify all players in active games
+    for (final game in matchmakingService.getGames()) {
+      final shutdownMsg = jsonEncode({
+        'server_restarting': true,
+        'game_id': game.gameId,
+      });
+      game.whiteChannel?.sink.add(shutdownMsg);
+      game.blackChannel?.sink.add(shutdownMsg);
+    }
+    
+    // Give time for messages to be sent
+    await Future.delayed(Duration(seconds: 1));
+    
+    databaseService.close();
+    matchmakingService.dispose();
+    await server.close();
+    exit(0);
+  });
+
+  ProcessSignal.sigint.watch().listen((signal) async {
+    print('Received SIGINT, shutting down gracefully...');
+    
+    // Notify all players in active games
+    for (final game in matchmakingService.getGames()) {
+      final shutdownMsg = jsonEncode({
+        'server_restarting': true,
+        'game_id': game.gameId,
+      });
+      game.whiteChannel?.sink.add(shutdownMsg);
+      game.blackChannel?.sink.add(shutdownMsg);
+    }
+    
+    // Give time for messages to be sent
+    await Future.delayed(Duration(seconds: 1));
+    
     databaseService.close();
     matchmakingService.dispose();
     await server.close();
