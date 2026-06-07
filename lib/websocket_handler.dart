@@ -118,13 +118,15 @@ Handler createWebSocketHandler(
           }
 
           final variant = data['variant'] as String? ?? 'standard';
-          final timeControl = data['time_control'] as String? ?? 'blitz';
+          final timeControlType = data['time_control_type'] as String? ?? 'blitz';
+          final timeControl = data['time_control'] as String? ?? '3:00|0';
           final rating = data['rating'] as int? ?? 1200;
           final ratingRange = data['rating_range'] as int? ?? 200;
 
           final result = await matchmakingService.findMatch(
             userId!,
             variant,
+            timeControlType,
             timeControl,
             rating,
             ratingRange,
@@ -137,7 +139,7 @@ Handler createWebSocketHandler(
             // Store game info for rating calculation
             currentGameId = result.gameId;
             currentVariantKey = variant;
-            currentTimeControlType = timeControl;
+            currentTimeControlType = timeControlType;
             
             channel.sink.add(jsonEncode({
               'match_found': true,

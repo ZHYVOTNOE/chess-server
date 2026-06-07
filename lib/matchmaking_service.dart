@@ -9,6 +9,7 @@ class MatchmakingQueueEntry {
   final String userId;
   final String variantKey;
   final String timeControlType;
+  final String timeControl;
   final int rating;
   final int ratingRange;
   final DateTime enteredAt;
@@ -18,6 +19,7 @@ class MatchmakingQueueEntry {
     required this.userId,
     required this.variantKey,
     required this.timeControlType,
+    required this.timeControl,
     required this.rating,
     required this.ratingRange,
     required this.enteredAt,
@@ -30,6 +32,7 @@ class GameSession {
   final String whiteId;
   final String blackId;
   final String variant;
+  final String timeControlType;
   final String timeControl;
   String status;
   final DateTime createdAt;
@@ -42,6 +45,7 @@ class GameSession {
     required this.whiteId,
     required this.blackId,
     required this.variant,
+    required this.timeControlType,
     required this.timeControl,
     required this.status,
     required this.createdAt,
@@ -82,6 +86,7 @@ class MatchmakingService {
     String userId,
     String variantKey,
     String timeControlType,
+    String timeControl,
     int rating,
     int ratingRange,
     WebSocketChannel? channel,
@@ -120,6 +125,7 @@ class MatchmakingService {
             userId: userId,
             variantKey: variantKey,
             timeControlType: timeControlType,
+            timeControl: timeControl,
             rating: rating,
             ratingRange: ratingRange,
             enteredAt: DateTime.now(),
@@ -137,6 +143,7 @@ class MatchmakingService {
             opponent.userId,
             variantKey,
             timeControlType,
+            timeControl,
             initialFen,
             channel,
             opponent.channel,
@@ -158,6 +165,7 @@ class MatchmakingService {
           userId: userId,
           variantKey: variantKey,
           timeControlType: timeControlType,
+          timeControl: timeControl,
           rating: rating,
           ratingRange: ratingRange,
           enteredAt: DateTime.now(),
@@ -174,6 +182,7 @@ class MatchmakingService {
     String player1Id,
     String player2Id,
     String variant,
+    String timeControlType,
     String timeControl,
     String initialFen,
     WebSocketChannel? player1Channel,
@@ -187,6 +196,7 @@ class MatchmakingService {
       whiteId: isPlayer1White ? player1Id : player2Id,
       blackId: isPlayer1White ? player2Id : player1Id,
       variant: variant,
+      timeControlType: timeControlType,
       timeControl: timeControl,
       status: 'in_progress',
       createdAt: DateTime.now(),
