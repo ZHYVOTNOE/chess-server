@@ -9,18 +9,49 @@ import 'package:server/websocket_handler.dart';
 import 'package:server/database_service.dart';
 import 'package:server/chess_validator.dart';
 import 'package:server/auth_service.dart';
+import 'package:server/supabase_service.dart';
+import 'package:server/rating_service.dart';
+import 'package:dotenv/dotenv.dart';
+
+// Load environment variables
+late final String _supabaseUrl;
+late final String _supabaseAnonKey;
+late final String _jwtSecret;
+
+void _loadEnv() {
+  final env = DotEnv(includePlatformEnvironment: true)..load();
+  _supabaseUrl = env['SUPABASE_URL'] ?? '';
+  _supabaseAnonKey = env['SUPABASE_ANON_KEY'] ?? '';
+  _jwtSecret = env['JWT_SECRET'] ?? 'default-secret-change-in-production';
+}
 
 // Initialize services
-final matchmakingService = MatchmakingService();
-final databaseService = DatabaseService();
-final chessValidator = ChessValidator();
-final authService = AuthService(Platform.environment['JWT_SECRET'] ?? 'default-secret-change-in-production');
+late final MatchmakingService matchmakingService;
+late final DatabaseService databaseService;
+late final ChessValidator chessValidator;
+late final AuthService authService;
+late final SupabaseService supabaseService;
+late final RatingService ratingService;
+
+void _initializeServices() {
+  _loadEnv();
+  
+  matchmakingService = MatchmakingService();
+  chessValidator = ChessValidator();
+  authService = AuthService(_jwtSecret);
+  supabaseService = SupabaseService(
+    supabaseUrl: _supabaseUrl,
+    supabaseAnonKey: _supabaseAnonKey,
+  );
+  databaseService = DatabaseService(supabaseService);
+  ratingService = RatingService(supabaseService);
+}
 
 // Configure routes.
 final _router = Router()
   ..get('/', _rootHandler)
   ..get('/echo/<message>', _echoHandler)
-  ..get('/ws', createWebSocketHandler(matchmakingService, databaseService, chessValidator, authService));
+  ..get('/ws', createWebSocketHandler(matchmakingService, databaseService, chessValidator, authService, ratingService));
 
 Response _rootHandler(Request req) {
   return Response.ok('Hello, World!\n');
@@ -32,6 +63,8 @@ Response _echoHandler(Request request) {
 }
 
 void main(List<String> args) async {
+  _initializeServices();
+  
   final ip = InternetAddress.anyIPv4;
 
   final handler = Pipeline()

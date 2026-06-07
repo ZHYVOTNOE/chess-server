@@ -1,4 +1,4 @@
-import 'package:sqlite3/sqlite3.dart';
+import 'supabase_service.dart';
 
 class GameMove {
   final String gameId;
@@ -41,46 +41,9 @@ class GameMove {
 }
 
 class DatabaseService {
-  late Database _db;
+  final SupabaseService _supabaseService;
 
-  DatabaseService() {
-    _initDatabase();
-  }
-
-  void _initDatabase() {
-    final dbPath = 'chess_game.db';
-    _db = sqlite3.open(dbPath);
-    _createTables();
-  }
-
-  void _createTables() {
-    _db.execute('''
-      CREATE TABLE IF NOT EXISTS game_moves (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        game_id TEXT NOT NULL,
-        fen TEXT NOT NULL,
-        move_number INTEGER NOT NULL,
-        white_time INTEGER NOT NULL,
-        black_time INTEGER NOT NULL,
-        created_at TEXT NOT NULL
-      )
-    ''');
-
-    _db.execute('''
-      CREATE INDEX IF NOT EXISTS idx_game_moves_game_id 
-      ON game_moves(game_id)
-    ''');
-
-    _db.execute('''
-      CREATE INDEX IF NOT EXISTS idx_game_moves_move_number 
-      ON game_moves(game_id, move_number)
-    ''');
-
-    _db.execute('''
-      CREATE UNIQUE INDEX IF NOT EXISTS idx_game_moves_unique 
-      ON game_moves(game_id, move_number)
-    ''');
-  }
+  DatabaseService(this._supabaseService);
 
   Future<bool> addMove(
     String gameId,
@@ -89,60 +52,26 @@ class DatabaseService {
     int whiteTime,
     int blackTime,
   ) async {
-    final stmt = _db.prepare('''
-      INSERT INTO game_moves (game_id, fen, move_number, white_time, black_time, created_at)
-      VALUES (?, ?, ?, ?, ?, ?)
-    ''');
-
-    try {
-      stmt.execute([
-        gameId,
-        fen,
-        moveNumber,
-        whiteTime,
-        blackTime,
-        DateTime.now().toIso8601String(),
-      ]);
-      return true;
-    } on SqliteException catch (e) {
-      // UNIQUE constraint violation (дубликат хода)
-      print('SQLite error on addMove: $e');
-      return false;
-    } catch (e) {
-      print('Unexpected error on addMove: $e');
-      return false;
-    } finally {
-      stmt.dispose();
-    }
+    return await _supabaseService.addMove(
+      gameId: gameId,
+      fen: fen,
+      moveNumber: moveNumber,
+      whiteTime: whiteTime,
+      blackTime: blackTime,
+    );
   }
 
   Future<List<GameMove>> getMoves(String gameId, {int fromMoveNumber = 0}) async {
-    final stmt = _db.prepare('''
-      SELECT game_id, fen, move_number, white_time, black_time, created_at
-      FROM game_moves
-      WHERE game_id = ? AND move_number >= ?
-      ORDER BY move_number ASC
-    ''');
-
-    final moves = <GameMove>[];
-    try {
-      final resultSet = stmt.select([gameId, fromMoveNumber]);
-      
-      for (final row in resultSet) {
-        moves.add(GameMove(
-          gameId: row['game_id'] as String,
-          fen: row['fen'] as String,
-          moveNumber: row['move_number'] as int,
-          whiteTime: row['white_time'] as int,
-          blackTime: row['black_time'] as int,
-          createdAt: DateTime.parse(row['created_at'] as String),
-        ));
-      }
-    } finally {
-      stmt.dispose();
-    }
+    final movesData = await _supabaseService.getMoves(gameId, fromMoveNumber: fromMoveNumber);
     
-    return moves;
+    return movesData.map((data) => GameMove(
+      gameId: data['game_id'] as String,
+      fen: data['fen'] as String,
+      moveNumber: data['move_number'] as int,
+      whiteTime: _parseDuration(data['white_time_remaining']),
+      blackTime: _parseDuration(data['black_time_remaining']),
+      createdAt: DateTime.parse(data['created_at'] as String),
+    )).toList();
   }
 
   Future<GameMove?> getInitialPosition(String gameId) async {
@@ -152,31 +81,29 @@ class DatabaseService {
   }
 
   Future<int> getLastMoveNumber(String gameId) async {
-    final stmt = _db.prepare('''
-      SELECT MAX(move_number) as max_move
-      FROM game_moves
-      WHERE game_id = ?
-    ''');
-
-    try {
-      final resultSet = stmt.select([gameId]);
-      final result = resultSet.first['max_move'];
-      return (result as int?) ?? 0;
-    } finally {
-      stmt.dispose();
-    }
+    final lastMoveNumber = await _supabaseService.getLastMoveNumber(gameId);
+    return lastMoveNumber ?? 0;
   }
 
   Future<void> deleteGameMoves(String gameId) async {
-    final stmt = _db.prepare('DELETE FROM game_moves WHERE game_id = ?');
-    try {
-      stmt.execute([gameId]);
-    } finally {
-      stmt.dispose();
-    }
+    // Supabase doesn't have a direct method for this, can be added if needed
+    // For now, this is a placeholder
   }
 
   void close() {
-    _db.dispose();
+    // Supabase client doesn't need explicit closing
+  }
+
+  int _parseDuration(String durationStr) {
+    // Parse PostgreSQL interval format to seconds
+    // Example: "00:05:00" -> 300 seconds
+    final parts = durationStr.split(':');
+    if (parts.length == 3) {
+      final hours = int.parse(parts[0]);
+      final minutes = int.parse(parts[1]);
+      final seconds = int.parse(parts[2]);
+      return hours * 3600 + minutes * 60 + seconds;
+    }
+    return 0;
   }
 }

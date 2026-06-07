@@ -7,17 +7,23 @@ import 'database_service.dart';
 import 'chess_validator.dart';
 import 'auth_service.dart';
 import 'rate_limiter.dart';
+import 'rating_service.dart';
 
 Handler createWebSocketHandler(
   MatchmakingService matchmakingService,
   DatabaseService databaseService,
   ChessValidator chessValidator,
   AuthService authService,
+  RatingService ratingService,
 ) {
   final rateLimiter = RateLimiter(maxRequests: 10, window: Duration(seconds: 1));
 
   return webSocketHandler((WebSocketChannel channel) {
     String? userId;
+    String? currentGameId;
+    String? currentVariantKey;
+    String? currentTimeControlType;
+    int? currentRatingRange;
 
     channel.stream.listen((message) async {
       try {
@@ -129,6 +135,12 @@ Handler createWebSocketHandler(
           if (!result.matchFound) {
             channel.sink.add(jsonEncode(result.toJson()));
           } else {
+            // Store game info for rating calculation
+            currentGameId = result.gameId;
+            currentVariantKey = variant;
+            currentTimeControlType = timeControl;
+            currentRatingRange = ratingRange;
+            
             channel.sink.add(jsonEncode({
               'match_found': true,
               'game_id': result.gameId,
@@ -280,6 +292,23 @@ Handler createWebSocketHandler(
             channel.sink.add(endMessage);
             opponentChannel?.sink.add(endMessage);
             
+            // Update ratings using Glicko-2
+            if (currentGameId != null && currentRatingRange != null) {
+              try {
+                await ratingService.updateRatings(
+                  gameId: currentGameId!,
+                  whiteId: game.whiteId,
+                  blackId: game.blackId,
+                  variantKey: currentVariantKey ?? 'standard',
+                  timeControlType: currentTimeControlType ?? 'blitz',
+                  result: gameEndResult.result ?? 'draw',
+                  ratingRange: currentRatingRange!,
+                );
+              } catch (e) {
+                print('Error updating ratings: $e');
+              }
+            }
+            
             matchmakingService.removeGame(gameId);
           }
         } else if (action == 'get_moves') {
@@ -341,6 +370,7 @@ Handler createWebSocketHandler(
           }
 
           final winnerId = userId == game.whiteId ? game.blackId : game.whiteId;
+          final result = userId == game.whiteId ? 'black' : 'white';
 
           final endMessage = jsonEncode({
             'game_over': true,
@@ -352,6 +382,23 @@ Handler createWebSocketHandler(
           final opponentChannel = userId == game.whiteId ? game.blackChannel : game.whiteChannel;
           channel.sink.add(endMessage); // Отправителю
           opponentChannel?.sink.add(endMessage); // Сопернику
+
+          // Update ratings using Glicko-2
+          if (currentGameId != null && currentRatingRange != null) {
+            try {
+              await ratingService.updateRatings(
+                gameId: currentGameId!,
+                whiteId: game.whiteId,
+                blackId: game.blackId,
+                variantKey: currentVariantKey ?? 'standard',
+                timeControlType: currentTimeControlType ?? 'blitz',
+                result: result,
+                ratingRange: currentRatingRange!,
+              );
+            } catch (e) {
+              print('Error updating ratings: $e');
+            }
+          }
 
           matchmakingService.removeGame(gameId);
         }
