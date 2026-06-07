@@ -103,7 +103,7 @@ class MatchmakingService {
       for (int i = 0; i < _queue.length; i++) {
         final entry = _queue[i];
         if (entry.variantKey == variantKey &&
-            entry.timeControlType == timeControlType &&
+            entry.timeControl == timeControl &&
             entry.userId != userId) {
           final ratingDiff = (entry.rating - rating).abs();
           final minRange = min(ratingRange, entry.ratingRange);
