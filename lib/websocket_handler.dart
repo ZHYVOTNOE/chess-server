@@ -23,7 +23,6 @@ Handler createWebSocketHandler(
     String? currentGameId;
     String? currentVariantKey;
     String? currentTimeControlType;
-    int? currentRatingRange;
 
     channel.stream.listen((message) async {
       try {
@@ -139,7 +138,6 @@ Handler createWebSocketHandler(
             currentGameId = result.gameId;
             currentVariantKey = variant;
             currentTimeControlType = timeControl;
-            currentRatingRange = ratingRange;
             
             channel.sink.add(jsonEncode({
               'match_found': true,
@@ -293,7 +291,7 @@ Handler createWebSocketHandler(
             opponentChannel?.sink.add(endMessage);
             
             // Update ratings using Glicko-2
-            if (currentGameId != null && currentRatingRange != null) {
+            if (currentGameId != null) {
               try {
                 await ratingService.updateRatings(
                   gameId: currentGameId!,
@@ -302,7 +300,6 @@ Handler createWebSocketHandler(
                   variantKey: currentVariantKey ?? 'standard',
                   timeControlType: currentTimeControlType ?? 'blitz',
                   result: gameEndResult.result ?? 'draw',
-                  ratingRange: currentRatingRange!,
                 );
               } catch (e) {
                 print('Error updating ratings: $e');
@@ -384,7 +381,7 @@ Handler createWebSocketHandler(
           opponentChannel?.sink.add(endMessage); // Сопернику
 
           // Update ratings using Glicko-2
-          if (currentGameId != null && currentRatingRange != null) {
+          if (currentGameId != null) {
             try {
               await ratingService.updateRatings(
                 gameId: currentGameId!,
@@ -393,7 +390,6 @@ Handler createWebSocketHandler(
                 variantKey: currentVariantKey ?? 'standard',
                 timeControlType: currentTimeControlType ?? 'blitz',
                 result: result,
-                ratingRange: currentRatingRange!,
               );
             } catch (e) {
               print('Error updating ratings: $e');

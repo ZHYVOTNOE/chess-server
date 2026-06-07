@@ -143,12 +143,16 @@ class SupabaseService {
     required String variantKey,
     required String timeControlType,
     required int rating,
+    required double rd,
+    required double volatility,
   }) async {
     await _client.from('ratings').upsert({
       'user_id': userId,
       'variant_key': variantKey,
       'time_control_type': timeControlType,
       'rating': rating,
+      'rd': rd,
+      'volatility': volatility,
       'last_updated_at': DateTime.now().toIso8601String(),
     });
   }

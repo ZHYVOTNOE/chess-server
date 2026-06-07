@@ -6,21 +6,18 @@ class RatingService {
   
   // Glicko-2 constants
   static const double _defaultRating = 1500;
+  static const double _defaultRd = 350;
   static const double _defaultVolatility = 0.06;
-  
-  // Volatility stored in memory (lost on server restart)
-  final Map<String, double> _volatilityCache = {};
 
   RatingService(this._supabaseService);
 
   /// Calculate new ratings after a game using Glicko-2 algorithm
-  Future<Map<String, int>> calculateRatings({
+  Future<Map<String, dynamic>> calculateRatings({
     required String whiteId,
     required String blackId,
     required String variantKey,
     required String timeControlType,
     required String result, // 'white', 'black', 'draw'
-    required int ratingRange, // RD parameter from matchmaking
   }) async {
     // Get current ratings
     final whiteRatingData = await _supabaseService.getRating(whiteId, variantKey, timeControlType);
@@ -29,13 +26,11 @@ class RatingService {
     final whiteRating = (whiteRatingData?['rating'] as int? ?? _defaultRating.toInt()).toDouble();
     final blackRating = (blackRatingData?['rating'] as int? ?? _defaultRating.toInt()).toDouble();
 
-    // Get volatility from cache or use default
-    final whiteVolatility = _volatilityCache['$whiteId-$variantKey-$timeControlType'] ?? _defaultVolatility;
-    final blackVolatility = _volatilityCache['$blackId-$variantKey-$timeControlType'] ?? _defaultVolatility;
-
-    // Use ratingRange as RD parameter
-    final whiteRd = ratingRange.toDouble();
-    final blackRd = ratingRange.toDouble();
+    // Get RD and volatility from database or use defaults
+    final whiteRd = (whiteRatingData?['rd'] as num? ?? _defaultRd).toDouble();
+    final blackRd = (blackRatingData?['rd'] as num? ?? _defaultRd).toDouble();
+    final whiteVolatility = (whiteRatingData?['volatility'] as num? ?? _defaultVolatility).toDouble();
+    final blackVolatility = (blackRatingData?['volatility'] as num? ?? _defaultVolatility).toDouble();
 
     // Calculate expected scores
     final expectedWhite = _expectedScore(whiteRating, blackRating, whiteRd);
@@ -64,14 +59,14 @@ class RatingService {
     }
 
     // Calculate new ratings using Glicko-2
-    final newWhiteRating = _calculateNewRating(
+    final whiteResult = _calculateNewRating(
       rating: whiteRating,
       rd: whiteRd,
       volatility: whiteVolatility,
       expectedScore: expectedWhite,
       actualScore: actualWhite,
     );
-    final newBlackRating = _calculateNewRating(
+    final blackResult = _calculateNewRating(
       rating: blackRating,
       rd: blackRd,
       volatility: blackVolatility,
@@ -79,13 +74,13 @@ class RatingService {
       actualScore: actualBlack,
     );
 
-    // Update volatility cache
-    _volatilityCache['$whiteId-$variantKey-$timeControlType'] = whiteVolatility;
-    _volatilityCache['$blackId-$variantKey-$timeControlType'] = blackVolatility;
-
     return {
-      'white': newWhiteRating.round(),
-      'black': newBlackRating.round(),
+      'white_rating': whiteResult['rating']!.round(),
+      'white_rd': whiteResult['rd']!,
+      'white_volatility': whiteResult['volatility']!,
+      'black_rating': blackResult['rating']!.round(),
+      'black_rd': blackResult['rd']!,
+      'black_volatility': blackResult['volatility']!,
     };
   }
 
@@ -97,7 +92,6 @@ class RatingService {
     required String variantKey,
     required String timeControlType,
     required String result,
-    required int ratingRange,
   }) async {
     // Calculate new ratings
     final newRatings = await calculateRatings(
@@ -106,7 +100,6 @@ class RatingService {
       variantKey: variantKey,
       timeControlType: timeControlType,
       result: result,
-      ratingRange: ratingRange,
     );
 
     // Get old ratings for history
@@ -121,14 +114,18 @@ class RatingService {
       userId: whiteId,
       variantKey: variantKey,
       timeControlType: timeControlType,
-      rating: newRatings['white']!.toInt(),
+      rating: newRatings['white_rating'] as int,
+      rd: newRatings['white_rd'] as double,
+      volatility: newRatings['white_volatility'] as double,
     );
 
     await _supabaseService.updateRating(
       userId: blackId,
       variantKey: variantKey,
       timeControlType: timeControlType,
-      rating: newRatings['black']!.toInt(),
+      rating: newRatings['black_rating'] as int,
+      rd: newRatings['black_rd'] as double,
+      volatility: newRatings['black_volatility'] as double,
     );
 
     // Record rating history
@@ -136,7 +133,7 @@ class RatingService {
       userId: whiteId,
       gameId: gameId,
       oldRating: oldWhiteRating.toInt(),
-      newRating: newRatings['white']!.toInt(),
+      newRating: newRatings['white_rating'] as int,
       variantKey: variantKey,
       timeControlType: timeControlType,
     );
@@ -145,7 +142,7 @@ class RatingService {
       userId: blackId,
       gameId: gameId,
       oldRating: oldBlackRating.toInt(),
-      newRating: newRatings['black']!.toInt(),
+      newRating: newRatings['black_rating'] as int,
       variantKey: variantKey,
       timeControlType: timeControlType,
     );
@@ -164,7 +161,7 @@ class RatingService {
   }
 
   /// Calculate new rating using Glicko-2 algorithm
-  double _calculateNewRating({
+  Map<String, double> _calculateNewRating({
     required double rating,
     required double rd,
     required double volatility,
@@ -175,7 +172,7 @@ class RatingService {
     final e = expectedScore;
     final s = actualScore;
 
-    // Calculate new volatility (simplified)
+    // Calculate new volatility (simplified - using current volatility)
     final newVolatility = volatility;
 
     // Calculate new RD
@@ -184,6 +181,10 @@ class RatingService {
     // Calculate new rating
     final newRating = rating + pow(newRd, 2) * g * (s - e);
 
-    return newRating;
+    return {
+      'rating': newRating,
+      'rd': newRd,
+      'volatility': newVolatility,
+    };
   }
 }

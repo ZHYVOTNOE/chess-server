@@ -85,11 +85,6 @@ class DatabaseService {
     return lastMoveNumber ?? 0;
   }
 
-  Future<void> deleteGameMoves(String gameId) async {
-    // Supabase doesn't have a direct method for this, can be added if needed
-    // For now, this is a placeholder
-  }
-
   void close() {
     // Supabase client doesn't need explicit closing
   }

@@ -1,5 +1,4 @@
 .dart_tool/
 .env
-.pubspec.lock
 build/
 
