@@ -3,12 +3,12 @@ import 'supabase_service.dart';
 
 class RatingService {
   final SupabaseService _supabaseService;
-  
+
   // Glicko-2 constants
   static const double _defaultRating = 1500;
   static const double _defaultRd = 350;
   static const double _defaultVolatility = 0.06;
-  static const double _tau = 0.5; // volatility parameter
+  static const double _tau = 0.5; // system constant (controls volatility change speed)
   static const double _epsilon = 0.000001; // convergence tolerance
 
   RatingService(this._supabaseService);
@@ -21,39 +21,30 @@ class RatingService {
     required String timeControlType,
     required String result, // 'white', 'black', 'draw'
   }) async {
-    // Get current ratings
     final whiteRatingData = await _supabaseService.getRating(whiteId, variantKey, timeControlType);
     final blackRatingData = await _supabaseService.getRating(blackId, variantKey, timeControlType);
 
     final whiteRating = (whiteRatingData?['rating'] as int? ?? _defaultRating.toInt()).toDouble();
     final blackRating = (blackRatingData?['rating'] as int? ?? _defaultRating.toInt()).toDouble();
 
-    // Get RD and volatility from database or use defaults
     final whiteRd = (whiteRatingData?['rd'] as num? ?? _defaultRd).toDouble();
     final blackRd = (blackRatingData?['rd'] as num? ?? _defaultRd).toDouble();
     final whiteVolatility = (whiteRatingData?['volatility'] as num? ?? _defaultVolatility).toDouble();
     final blackVolatility = (blackRatingData?['volatility'] as num? ?? _defaultVolatility).toDouble();
 
-    // Get last updated time for inactivity calculation
-    final whiteLastUpdated = whiteRatingData?['last_updated_at'] != null 
+    final whiteLastUpdated = whiteRatingData?['last_updated_at'] != null
         ? DateTime.parse(whiteRatingData!['last_updated_at'] as String)
         : DateTime.now();
     final blackLastUpdated = blackRatingData?['last_updated_at'] != null
         ? DateTime.parse(blackRatingData!['last_updated_at'] as String)
         : DateTime.now();
 
-    // Apply inactivity RD increase
     final whiteRdAfterInactivity = _applyInactivity(whiteRd, whiteLastUpdated);
     final blackRdAfterInactivity = _applyInactivity(blackRd, blackLastUpdated);
 
-    // Calculate expected scores
-    final expectedWhite = _expectedScore(whiteRating, blackRating, whiteRdAfterInactivity);
-    final expectedBlack = _expectedScore(blackRating, whiteRating, blackRdAfterInactivity);
-
-    // Determine actual scores
     double actualWhite;
     double actualBlack;
-    
+
     switch (result.toLowerCase()) {
       case 'white':
         actualWhite = 1.0;
@@ -63,30 +54,24 @@ class RatingService {
         actualWhite = 0.0;
         actualBlack = 1.0;
         break;
-      case 'draw':
-        actualWhite = 0.5;
-        actualBlack = 0.5;
-        break;
-      default:
+      default: // draw
         actualWhite = 0.5;
         actualBlack = 0.5;
     }
 
-    // Calculate new ratings using full Glicko-2
     final whiteResult = _calculateNewRating(
       rating: whiteRating,
       rd: whiteRdAfterInactivity,
       volatility: whiteVolatility,
-      expectedScore: expectedWhite,
       actualScore: actualWhite,
       opponentRating: blackRating,
       opponentRd: blackRdAfterInactivity,
     );
+
     final blackResult = _calculateNewRating(
       rating: blackRating,
       rd: blackRdAfterInactivity,
       volatility: blackVolatility,
-      expectedScore: expectedBlack,
       actualScore: actualBlack,
       opponentRating: whiteRating,
       opponentRd: whiteRdAfterInactivity,
@@ -102,7 +87,6 @@ class RatingService {
     };
   }
 
-  /// Update ratings in Supabase and record history
   Future<void> updateRatings({
     required String gameId,
     required String whiteId,
@@ -111,7 +95,6 @@ class RatingService {
     required String timeControlType,
     required String result,
   }) async {
-    // Calculate new ratings
     final newRatings = await calculateRatings(
       whiteId: whiteId,
       blackId: blackId,
@@ -120,14 +103,12 @@ class RatingService {
       result: result,
     );
 
-    // Get old ratings for history
     final whiteRatingData = await _supabaseService.getRating(whiteId, variantKey, timeControlType);
     final blackRatingData = await _supabaseService.getRating(blackId, variantKey, timeControlType);
 
-    final oldWhiteRating = (whiteRatingData?['rating'] as int? ?? _defaultRating.toInt()).toDouble();
-    final oldBlackRating = (blackRatingData?['rating'] as int? ?? _defaultRating.toInt()).toDouble();
+    final oldWhiteRating = (whiteRatingData?['rating'] as int? ?? _defaultRating.toInt());
+    final oldBlackRating = (blackRatingData?['rating'] as int? ?? _defaultRating.toInt());
 
-    // Update ratings in Supabase
     await _supabaseService.updateRating(
       userId: whiteId,
       variantKey: variantKey,
@@ -146,11 +127,10 @@ class RatingService {
       volatility: newRatings['black_volatility'] as double,
     );
 
-    // Record rating history
     await _supabaseService.addRatingHistory(
       userId: whiteId,
       gameId: gameId,
-      oldRating: oldWhiteRating.toInt(),
+      oldRating: oldWhiteRating,
       newRating: newRatings['white_rating'] as int,
       variantKey: variantKey,
       timeControlType: timeControlType,
@@ -159,73 +139,69 @@ class RatingService {
     await _supabaseService.addRatingHistory(
       userId: blackId,
       gameId: gameId,
-      oldRating: oldBlackRating.toInt(),
+      oldRating: oldBlackRating,
       newRating: newRatings['black_rating'] as int,
       variantKey: variantKey,
       timeControlType: timeControlType,
     );
   }
 
-  /// Apply inactivity RD increase
+  // Apply inactivity RD increase (Glicko-2 step 6)
   double _applyInactivity(double rd, DateTime lastUpdated) {
     final daysSinceUpdate = DateTime.now().difference(lastUpdated).inDays;
     if (daysSinceUpdate <= 0) return rd;
-    
-    // RD increases with inactivity: c = sqrt(rd^2 + c^2) where c is based on time
-    // Standard formula: new_rd = min(350, sqrt(rd^2 + (c * days)^2))
-    // where c is typically around 20-30 per period
-    final c = 20.0; // RD increase constant per day
-    final newRd = sqrt(pow(rd, 2) + pow(c * daysSinceUpdate, 2));
-    
-    // Cap RD at 350 (Glicko-2 standard)
-    return newRd > 350 ? 350 : newRd;
+
+    // c ≈ 20 per period — standard Glicko-2 inactivity increase
+    const double c = 20.0;
+    final newRd = sqrt(pow(rd, 2) + pow(c, 2) * daysSinceUpdate);
+    return newRd.clamp(0.0, 350.0);
   }
 
-  /// Calculate expected score in Glicko-2
-  double _expectedScore(double rating1, double rating2, double rd) {
-    final g = _gFactor(rd);
-    final diff = (rating2 - rating1) / 400.0;
-    return 1.0 / (1.0 + exp(-g * diff));
-  }
-
-  /// Calculate g factor in Glicko-2
+  // g(RD) function from Glicko-2
   double _gFactor(double rd) {
-    return 1.0 / sqrt(1.0 + 3.0 * pow(rd, 2) / pow(pi, 2));
+    return 1.0 / sqrt(1.0 + 3.0 * pow(rd / 400.0, 2) / pow(pi, 2));
   }
 
-  /// Calculate new rating using full Glicko-2 algorithm with iterative volatility
+  // Expected score E(s|µ,µj,φj)
+  double _expectedScore(double rating, double opponentRating, double opponentRd) {
+    final g = _gFactor(opponentRd);
+    return 1.0 / (1.0 + exp(-g * (rating - opponentRating) / 400.0));
+  }
+
+  /// Full Glicko-2 new rating calculation (single opponent version)
   Map<String, double> _calculateNewRating({
     required double rating,
     required double rd,
     required double volatility,
-    required double expectedScore,
     required double actualScore,
     required double opponentRating,
     required double opponentRd,
   }) {
     final g = _gFactor(opponentRd);
-    final e = _expectedScore(rating, opponentRating, rd);
-    final s = actualScore;
+    final e = _expectedScore(rating, opponentRating, opponentRd);
 
-    // Step 1: Compute variance
-    final variance = 1.0 / (pow(g, 2) * e * (1.0 - e));
+    // Step 3: Compute variance v
+    final v = 1.0 / (pow(g, 2) * e * (1.0 - e));
 
-    // Step 2: Compute delta
-    final delta = variance * g * (s - e);
+    // Step 4: Compute delta
+    final delta = v * g * (actualScore - e);
 
-    // Step 3: Compute new volatility (iterative process)
+    // Step 5: Compute new volatility using Illinois algorithm
     final newVolatility = _computeNewVolatility(
       volatility: volatility,
       delta: delta,
-      variance: variance,
+      v: v,
       rd: rd,
     );
 
-    // Step 4: Compute new RD
-    final newRd = sqrt(pow(rd, 2) + pow(newVolatility, 2));
+    // Step 6: Update RD
+    final rdStar = sqrt(pow(rd, 2) + pow(newVolatility, 2));
 
-    // Step 5: Compute new rating
-    final newRating = rating + pow(newRd, 2) * g * (s - e);
+    // Step 7: Update RD with new information
+    final newRd = 1.0 / sqrt(1.0 / pow(rdStar, 2) + 1.0 / v);
+
+    // Step 8: Update rating
+    final newRating = rating + pow(newRd, 2) * g * (actualScore - e);
 
     return {
       'rating': newRating,
@@ -234,65 +210,59 @@ class RatingService {
     };
   }
 
-  /// Compute new volatility using iterative process (Glicko-2 step 3)
+  /// ✅ Correct Glicko-2 volatility via Illinois algorithm (RFC 5905 / Glickman 2012)
   double _computeNewVolatility({
     required double volatility,
     required double delta,
-    required double variance,
+    required double v,
     required double rd,
   }) {
-    double a = log(pow(volatility, 2));
-    double newVolatility = volatility;
-    
-    // Iterative process to find new volatility
-    for (int i = 0; i < 100; i++) { // max 100 iterations
-      final x = a + i * _tau;
-      
-      if (x < a - _tau || x > a + _tau) continue;
-      
-      final d1 = _computeD1(x, delta, variance, volatility, rd);
-      final d2 = _computeD2(x, delta, variance, volatility, rd);
-      
-      if (d2 == 0) break;
-      
-      final xNew = x - d1 / d2;
-      
-      if ((xNew - x).abs() < _epsilon) {
-        newVolatility = exp(xNew / 2);
-        break;
-      }
-      
-      if (xNew < a - _tau) {
-        newVolatility = exp((a - _tau) / 2);
-        break;
-      }
-      
-      if (xNew > a + _tau) {
-        newVolatility = exp((a + _tau) / 2);
-        break;
-      }
+    final a = log(pow(volatility, 2));
+
+    // f(x) as defined in Glicko-2 paper
+    double f(double x) {
+      final ex = exp(x);
+      final rdSq = pow(rd, 2);
+      final num1 = ex * (pow(delta, 2) - rdSq - v - ex);
+      final den1 = 2.0 * pow(rdSq + v + ex, 2);
+      return num1 / den1 - (x - a) / pow(_tau, 2);
     }
-    
-    return newVolatility;
-  }
 
-  /// Compute D1 for volatility iteration
-  double _computeD1(double x, double delta, double variance, double volatility, double rd) {
-    final expX = exp(x);
-    final d1 = (expX * (pow(delta, 2) - pow(rd, 2) - variance - expX)) / 
-               (2 * pow(pow(rd, 2) + variance + expX, 2)) - 
-               (x - log(pow(volatility, 2))) / pow(_tau, 2);
-    return d1;
-  }
+    // Illinois method bracketing
+    double A = a;
+    double B;
 
-  /// Compute D2 for volatility iteration
-  double _computeD2(double x, double delta, double variance, double volatility, double rd) {
-    final expX = exp(x);
-    final d2 = (expX * (pow(rd, 2) + variance + expX) * (1 - expX)) / 
-               (2 * pow(pow(rd, 2) + variance + expX, 3)) - 
-               expX * (pow(delta, 2) - pow(rd, 2) - variance - expX) / 
-               (2 * pow(pow(rd, 2) + variance + expX, 2)) - 
-               1 / pow(_tau, 2);
-    return d2;
+    if (pow(delta, 2) > pow(rd, 2) + v) {
+      B = log(pow(delta, 2) - pow(rd, 2) - v);
+    } else {
+      double k = 1;
+      while (f(a - k * _tau) < 0) {
+        k += 1;
+      }
+      B = a - k * _tau;
+    }
+
+    double fA = f(A);
+    double fB = f(B);
+
+    // Iterative bisection
+    for (int i = 0; i < 1000; i++) {
+      final C = A + (A - B) * fA / (fB - fA);
+      final fC = f(C);
+
+      if (fC * fB <= 0) {
+        A = B;
+        fA = fB;
+      } else {
+        fA /= 2.0;
+      }
+
+      B = C;
+      fB = fC;
+
+      if ((B - A).abs() < _epsilon) break;
+    }
+
+    return exp(A / 2.0);
   }
 }

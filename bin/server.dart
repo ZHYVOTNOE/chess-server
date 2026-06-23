@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 import 'dart:convert';
 
@@ -16,13 +17,11 @@ import 'package:dotenv/dotenv.dart';
 // Load environment variables
 late final String _supabaseUrl;
 late final String _supabaseAnonKey;
-late final String _jwtSecret;
 
 void _loadEnv() {
   final env = DotEnv(includePlatformEnvironment: true)..load();
   _supabaseUrl = env['SUPABASE_URL'] ?? '';
   _supabaseAnonKey = env['SUPABASE_ANON_KEY'] ?? '';
-  _jwtSecret = env['JWT_SECRET'] ?? 'default-secret-change-in-production';
 }
 
 // Initialize services
@@ -35,10 +34,10 @@ late final RatingService ratingService;
 
 void _initializeServices() {
   _loadEnv();
-  
+
   matchmakingService = MatchmakingService();
   chessValidator = ChessValidator();
-  authService = AuthService(_jwtSecret);
+  authService = AuthService(_supabaseUrl); 
   supabaseService = SupabaseService(
     supabaseUrl: _supabaseUrl,
     supabaseAnonKey: _supabaseAnonKey,
@@ -46,12 +45,6 @@ void _initializeServices() {
   databaseService = DatabaseService(supabaseService);
   ratingService = RatingService(supabaseService);
 }
-
-// Configure routes.
-final _router = Router()
-  ..get('/', _rootHandler)
-  ..get('/echo/<message>', _echoHandler)
-  ..get('/ws', createWebSocketHandler(matchmakingService, databaseService, chessValidator, authService, ratingService));
 
 Response _rootHandler(Request req) {
   return Response.ok('Hello, World!\n');
@@ -63,45 +56,62 @@ Response _echoHandler(Request request) {
 }
 
 void main(List<String> args) async {
+    stdout.lineTerminator = '\n';
+  stdout.writeln('🚀 SERVER STARTING - NEW CODE VERSION');
   _initializeServices();
-  
-  final ip = InternetAddress.anyIPv4;
 
+  // ✅ WebSocket handler создаётся ПОСЛЕ инициализации сервисов
+  final wsHandler = createWebSocketHandler(
+    matchmakingService,
+    databaseService,
+    chessValidator,
+    authService,
+    ratingService,
+  );
+
+  // ✅ Роутер только для HTTP-эндпоинтов
+  final router = Router()
+    ..get('/', _rootHandler)
+    ..get('/echo/<message>', _echoHandler);
+
+  // ✅ WebSocket перехватывается ДО роутера
   final handler = Pipeline()
       .addMiddleware(logRequests())
-      .addHandler(_router.call);
+      .addHandler((Request request) {
+        if (request.url.path == 'ws') {
+          print('🔌 [MAIN] WebSocket upgrade request received for /ws');
+          return wsHandler(request);
+        }
+        return router.call(request);
+      });
 
+  final ip = InternetAddress.anyIPv4;
   final port = int.parse(Platform.environment['PORT'] ?? '8080');
   final server = await serve(handler, ip, port);
   print('Server listening on port ${server.port}');
+  print('WebSocket endpoint: ws://localhost:${server.port}/ws');
+
+  Timer.periodic(Duration(seconds: 30), (_) {
+    final channels = getConnectedChannels();
+    for (var channel in channels) {
+      try {
+        // Отправляем легковесное JSON-сообщение
+        channel.sink.add(jsonEncode({
+          'action': 'ping', 
+          'timestamp': DateTime.now().millisecondsSinceEpoch
+        }));
+      } catch (e) {
+        // Если отправка упала, значит соединение точно мертво. 
+        // Оно удалится из списка в onDone/onError.
+        print('⚠️ [KEEP-ALIVE] Failed to send ping: $e');
+      }
+    }
+  });
 
   // Graceful Shutdown
-  ProcessSignal.sigterm.watch().listen((signal) async {
-    print('Received SIGTERM, shutting down gracefully...');
-    
-    // Notify all players in active games
-    for (final game in matchmakingService.getGames()) {
-      final shutdownMsg = jsonEncode({
-        'server_restarting': true,
-        'game_id': game.gameId,
-      });
-      game.whiteChannel?.sink.add(shutdownMsg);
-      game.blackChannel?.sink.add(shutdownMsg);
-    }
-    
-    // Give time for messages to be sent
-    await Future.delayed(Duration(seconds: 1));
-    
-    databaseService.close();
-    matchmakingService.dispose();
-    await server.close();
-    exit(0);
-  });
+  void shutdown() async {
+    print('Shutting down gracefully...');
 
-  ProcessSignal.sigint.watch().listen((signal) async {
-    print('Received SIGINT, shutting down gracefully...');
-    
-    // Notify all players in active games
     for (final game in matchmakingService.getGames()) {
       final shutdownMsg = jsonEncode({
         'server_restarting': true,
@@ -110,13 +120,15 @@ void main(List<String> args) async {
       game.whiteChannel?.sink.add(shutdownMsg);
       game.blackChannel?.sink.add(shutdownMsg);
     }
-    
-    // Give time for messages to be sent
+
     await Future.delayed(Duration(seconds: 1));
-    
+
     databaseService.close();
     matchmakingService.dispose();
     await server.close();
     exit(0);
-  });
+  }
+
+  ProcessSignal.sigterm.watch().listen((_) => shutdown());
+  ProcessSignal.sigint.watch().listen((_) => shutdown());
 }

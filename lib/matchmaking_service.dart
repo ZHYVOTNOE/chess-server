@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 import 'dart:math';
 import 'package:web_socket_channel/web_socket_channel.dart';
 import 'package:synchronized/synchronized.dart';
@@ -72,7 +73,7 @@ class MatchmakingService {
   final List<MatchmakingQueueEntry> _queue = [];
   final Map<String, GameSession> _games = {};
   final Map<String, String> _gameStates = {};
-  final Map<String, Timer> _disconnectTimers = {}; // gameId -> Timer
+  final Map<String, Timer> _disconnectTimers = {};
   final Random _random = Random();
   final ChessValidator _chessValidator;
   final Lock _lock = Lock();
@@ -82,101 +83,198 @@ class MatchmakingService {
   MatchmakingService({ChessValidator? chessValidator})
       : _chessValidator = chessValidator ?? ChessValidator();
 
-  Future<MatchmakingResult> findMatch(
-    String userId,
-    String variantKey,
-    String timeControlType,
-    String timeControl,
-    int rating,
-    int ratingRange,
-    WebSocketChannel? channel,
-  ) async {
-    return await _lock.synchronized(() {
-      final existingIndex = _queue.indexWhere((e) => e.userId == userId);
-      if (existingIndex != -1) {
-        _queue.removeAt(existingIndex);
-      }
-
+    Future<MatchmakingResult> findMatch(
+      String userId,
+      String variantKey,
+      String timeControlType,
+      String timeControl,
+      int rating,
+      int ratingRange,
+      WebSocketChannel? channel,
+    ) async {
+      GameSession? createdGame;
       MatchmakingQueueEntry? opponent;
-      int opponentIndex = -1;
 
-      for (int i = 0; i < _queue.length; i++) {
-        final entry = _queue[i];
-        if (entry.variantKey == variantKey &&
-            entry.timeControl == timeControl &&
-            entry.userId != userId) {
+      final initialFen = _chessValidator.getInitialFen(variantKey);
+
+      stdout.writeln('');
+      stdout.writeln('========================================');
+      stdout.writeln('🔍 FIND MATCH REQUEST');
+      stdout.writeln('userId=$userId');
+      stdout.writeln('variant=$variantKey');
+      stdout.writeln('timeControlType=$timeControlType');
+      stdout.writeln('timeControl=$timeControl');
+      stdout.writeln('rating=$rating');
+      stdout.writeln('ratingRange=$ratingRange');
+      stdout.writeln('queueSizeBefore=${_queue.length}');
+      stdout.writeln('========================================');
+
+      await _lock.synchronized(() {
+        stdout.writeln('📋 CURRENT QUEUE:');
+
+        if (_queue.isEmpty) {
+          stdout.writeln('   <empty>');
+        } else {
+          for (final q in _queue) {
+            stdout.writeln(
+              '   user=${q.userId} '
+              'variant=${q.variantKey} '
+              'type=${q.timeControlType} '
+              'tc=${q.timeControl} '
+              'rating=${q.rating} '
+              'range=${q.ratingRange}',
+            );
+          }
+        }
+
+        // удаляем старую запись игрока
+        final beforeRemove = _queue.length;
+        _queue.removeWhere((e) => e.userId == userId);
+
+        if (_queue.length != beforeRemove) {
+          stdout.writeln(
+            '🗑 Removed previous queue entry for user $userId',
+          );
+        }
+
+        int opponentIndex = -1;
+
+        for (int i = 0; i < _queue.length; i++) {
+          final entry = _queue[i];
+
+          stdout.writeln(
+            '🔎 Checking opponent ${entry.userId}',
+          );
+
+          if (entry.variantKey != variantKey) {
+            stdout.writeln(
+              '❌ Variant mismatch: ${entry.variantKey} != $variantKey',
+            );
+            continue;
+          }
+
+          if (entry.timeControl != timeControl) {
+            stdout.writeln(
+              '❌ TimeControl mismatch: ${entry.timeControl} != $timeControl',
+            );
+            continue;
+          }
+
+          if (entry.userId == userId) {
+            stdout.writeln(
+              '❌ Same user',
+            );
+            continue;
+          }
+
           final ratingDiff = (entry.rating - rating).abs();
           final minRange = min(ratingRange, entry.ratingRange);
-          
+
+          stdout.writeln(
+            '📊 ratingDiff=$ratingDiff minRange=$minRange',
+          );
+
           if (ratingDiff <= minRange) {
             opponent = entry;
             opponentIndex = i;
+
+            stdout.writeln(
+              '✅ MATCH FOUND WITH ${entry.userId}',
+            );
+
             break;
+          } else {
+            stdout.writeln(
+              '❌ Rating mismatch',
+            );
           }
         }
-      }
 
-      if (opponent != null) {
-        // Проверка активности канала оппонента (#8)
-        if (opponent.channel != null && opponent.channel!.closeCode != null) {
-          // Канал закрыт, пропускаем этого оппонента и добавляем в очередь
+        if (opponent != null) {
           _queue.removeAt(opponentIndex);
-          final entry = MatchmakingQueueEntry(
-            userId: userId,
-            variantKey: variantKey,
-            timeControlType: timeControlType,
-            timeControl: timeControl,
-            rating: rating,
-            ratingRange: ratingRange,
-            enteredAt: DateTime.now(),
-            channel: channel,
+
+          stdout.writeln(
+            '🎮 Creating game: $userId vs ${opponent!.userId}',
           );
-          _queue.add(entry);
-          return MatchmakingResult(matchFound: false);
-        } else {
-          _queue.removeAt(opponentIndex);
 
-          final initialFen = _chessValidator.getInitialFen(variantKey);
-
-          final game = createGame(
+          createdGame = createGame(
             userId,
-            opponent.userId,
+            opponent!.userId,
             variantKey,
             timeControlType,
             timeControl,
             initialFen,
             channel,
-            opponent.channel,
+            opponent!.channel,
           );
 
-          if (opponent.channel != null) {
-            _sendMatchFoundNotification(opponent.channel!, game, opponent.userId == game.whiteId);
-          }
+          stdout.writeln(
+            '🎮 Game created: ${createdGame!.gameId}',
+          );
+        } else {
+          _queue.add(
+            MatchmakingQueueEntry(
+              userId: userId,
+              variantKey: variantKey,
+              timeControlType: timeControlType,
+              timeControl: timeControl,
+              rating: rating,
+              ratingRange: ratingRange,
+              enteredAt: DateTime.now(),
+              channel: channel,
+            ),
+          );
 
-          return MatchmakingResult(
-            matchFound: true,
-            gameId: game.gameId,
-            whiteId: game.whiteId,
-            blackId: game.blackId,
+          stdout.writeln(
+            '📥 Added to queue: $userId',
+          );
+
+          stdout.writeln(
+            '📋 Queue size now: ${_queue.length}',
           );
         }
-      } else {
-        final entry = MatchmakingQueueEntry(
-          userId: userId,
-          variantKey: variantKey,
-          timeControlType: timeControlType,
-          timeControl: timeControl,
-          rating: rating,
-          ratingRange: ratingRange,
-          enteredAt: DateTime.now(),
-          channel: channel,
-        );
-        _queue.add(entry);
+      });
 
-        return MatchmakingResult(matchFound: false);
+      if (createdGame != null && opponent != null) {
+        stdout.writeln(
+          '📨 Sending notification to opponent ${opponent!.userId}',
+        );
+
+        try {
+          if (opponent!.channel != null) {
+            _sendMatchFoundNotification(
+              opponent!.channel!,
+              createdGame!,
+              opponent!.userId == createdGame!.whiteId,
+            );
+          }
+
+          stdout.writeln(
+            '✅ Opponent notified successfully',
+          );
+        } catch (e) {
+          stdout.writeln(
+            '❌ Failed to notify opponent: $e',
+          );
+        }
+
+        return MatchmakingResult(
+          matchFound: true,
+          gameId: createdGame!.gameId,
+          whiteId: createdGame!.whiteId,
+          blackId: createdGame!.blackId,
+          initialFen: initialFen,
+        );
       }
-    });
-  }
+
+      stdout.writeln(
+        '⌛ No match found, waiting in queue',
+      );
+
+      return MatchmakingResult(
+        matchFound: false,
+      );
+    }
 
   GameSession createGame(
     String player1Id,
@@ -231,7 +329,18 @@ class MatchmakingService {
     ).toList();
   }
 
-  // Обновление канала игрока при реконнекте
+  List<Map<String, dynamic>> getQueueDebug() {
+    return _queue.map((entry) => {
+      'userId': entry.userId,
+      'variantKey': entry.variantKey,
+      'timeControlType': entry.timeControlType,
+      'timeControl': entry.timeControl,
+      'rating': entry.rating,
+      'ratingRange': entry.ratingRange,
+      'enteredAt': entry.enteredAt.toIso8601String(),
+    }).toList();
+  }
+
   void updatePlayerChannel(String gameId, String userId, WebSocketChannel channel) {
     final game = _games[gameId];
     if (game == null) return;
@@ -242,30 +351,25 @@ class MatchmakingService {
       game.blackChannel = channel;
     }
     
-    // Отменяем таймер дисконнекта, если он был
     _disconnectTimers[gameId]?.cancel();
     _disconnectTimers.remove(gameId);
   }
 
-  // Обработка отключения игрока с таймером на реконнект
   void handlePlayerDisconnect(String userId) {
     final userGames = getUserGames(userId);
     
     for (final game in userGames) {
-      // Если таймер уже запущен - не дублируем
       if (_disconnectTimers.containsKey(game.gameId)) continue;
       
       final opponentId = game.whiteId == userId ? game.blackId : game.whiteId;
       final opponentChannel = game.whiteId == userId ? game.blackChannel : game.whiteChannel;
       
-      // Уведомляем соперника
       opponentChannel?.sink.add(jsonEncode({
         'opponent_disconnected': true,
         'game_id': game.gameId,
         'reconnect_timeout': reconnectTimeoutSeconds,
       }));
       
-      // Запускаем таймер
       _disconnectTimers[game.gameId] = Timer(
         Duration(seconds: reconnectTimeoutSeconds),
         () {
@@ -327,7 +431,6 @@ class MatchmakingService {
     }
     _disconnectTimers.clear();
     
-    // Close all WebSocket channels
     for (final game in _games.values) {
       game.whiteChannel?.sink.close();
       game.blackChannel?.sink.close();
@@ -340,12 +443,14 @@ class MatchmakingResult {
   final String? gameId;
   final String? whiteId;
   final String? blackId;
+  final String? initialFen; // ✅ ДОБАВЛЕНО
 
   MatchmakingResult({
     required this.matchFound,
     this.gameId,
     this.whiteId,
     this.blackId,
+    this.initialFen,
   });
 
   Map<String, dynamic> toJson() {
@@ -355,6 +460,7 @@ class MatchmakingResult {
         'game_id': gameId,
         'white_id': whiteId,
         'black_id': blackId,
+        'initial_fen': initialFen, // ✅ ДОБАВЛЕНО
       };
     } else {
       return {'match_found': false};
